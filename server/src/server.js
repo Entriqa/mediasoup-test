@@ -6,6 +6,9 @@ const express = require("express");
 
 const config = require('./config');
 const FFmpeg = require('./ffmpeg');
+
+const path = require('path');
+const { promisify } = require('util');
 // const GStreamer = require('./gstreamer');
 const {
   initializeWorkers,
@@ -39,6 +42,7 @@ wss.on('connection', async (socket, request) => {
     const sessionId = uuidv1();
     socket.sessionId = sessionId;
     const peer = new Peer(sessionId);
+    peer.socket = socket;
     peers.set(sessionId, peer);
 
     const message = JSON.stringify({
@@ -196,7 +200,6 @@ const handleStopRecordRequest = async (jsonMessage) => {
   peer.process.kill();
   peer.process = undefined;
 
-  // Release ports from port set
   for (const remotePort of peer.remotePorts) {
     releasePort(remotePort);
   }
@@ -205,29 +208,24 @@ const handleStopRecordRequest = async (jsonMessage) => {
 const publishProducerRtpStream = async (peer, producer, ffmpegRtpCapabilities) => {
   console.log('publishProducerRtpStream()');
 
-  // Create the mediasoup RTP Transport used to send media to the GStreamer process
   const rtpTransportConfig = config.plainRtpTransport;
 
-  // If the process is set to GStreamer set rtcpMux to false
   if (PROCESS_NAME === 'GStreamer') {
     rtpTransportConfig.rtcpMux = false;
   }
 
   const rtpTransport = await createTransport('plain', router, rtpTransportConfig);
 
-  // Set the receiver RTP ports
   const remoteRtpPort = await getPort();
   peer.remotePorts.push(remoteRtpPort);
 
   let remoteRtcpPort;
-  // If rtpTransport rtcpMux is false also set the receiver RTCP ports
   if (!rtpTransportConfig.rtcpMux) {
     remoteRtcpPort = await getPort();
     peer.remotePorts.push(remoteRtcpPort);
   }
 
 
-  // Connect the mediasoup RTP transport to the ports used by GStreamer
   await rtpTransport.connect({
     ip: '127.0.0.1',
     port: remoteRtpPort,
@@ -237,7 +235,6 @@ const publishProducerRtpStream = async (peer, producer, ffmpegRtpCapabilities) =
   peer.addTransport(rtpTransport);
 
   const codecs = [];
-  // Codec passed to the RTP Consumer must match the codec in the Mediasoup router rtpCapabilities
   const routerCodec = router.rtpCapabilities.codecs.find(
     codec => codec.kind === producer.kind
   );
@@ -276,32 +273,50 @@ const startRecord = async (peer) => {
 
   recordInfo.fileName = Date.now().toString();
 
-  const ffmpeg = getProcess(recordInfo);
+  const ffmpeg = getProcess(recordInfo, (firstFrameBuffer, lastFrameBuffer) => {
+    sendFramesToClient(peer, firstFrameBuffer, lastFrameBuffer);
+  });
   peer.process = ffmpeg;
-
 
   setTimeout(async () => {
     for (const consumer of peer.consumers) {
-
       await consumer.resume();
       await consumer.requestKeyFrame();
     }
   }, 1000);
-
-
 };
 
-// Returns process command to use (GStreamer/FFmpeg) default is FFmpeg
-const getProcess = (recordInfo) => {
+const getProcess = (recordInfo, onFramesProcessed) => {
   switch (PROCESS_NAME) {
-    // case 'GStreamer':
-    //   return new GStreamer(recordInfo);
+      // case 'GStreamer':
+      //   return new GStreamer(recordInfo);
     case 'FFmpeg':
     default:
-
-      return new FFmpeg(recordInfo);
+      return new FFmpeg(recordInfo, onFramesProcessed);
   }
 };
+
+const getBase64Image = async (buffer) => {
+  return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+};
+
+function sendFramesToClient(peer, firstFrameBuffer, lastFrameBuffer) {
+  Promise.all([
+    getBase64Image(firstFrameBuffer),
+    getBase64Image(lastFrameBuffer)
+  ])
+      .then(([startFrameBase64String, endFrameBase64String]) => {
+        peer.socket.send(JSON.stringify({
+          action: 'frames',
+          startFrame: startFrameBase64String,
+          endFrame: endFrameBase64String
+        }));
+      })
+      .catch(error => {
+        console.error('Error encoding frames:', error);
+      });
+}
+
 
 (async () => {
   try {

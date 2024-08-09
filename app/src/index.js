@@ -18,7 +18,12 @@ const handleSocketOpen = async () => {
 const handleSocketMessage = async (message) => {
   try {
     const jsonMessage = JSON.parse(message.data);
-    handleJsonMessage(jsonMessage);
+
+    if (jsonMessage.action === 'frames') {
+      handleFrames(jsonMessage);
+    } else {
+      handleJsonMessage(jsonMessage);
+    }
   } catch (error) {
     console.error('handleSocketMessage() failed [error:%o]', error);
   }
@@ -73,7 +78,8 @@ const handleJsonMessage = async (jsonMessage) => {
     case 'produce':
       handleProduceRequest(jsonMessage);
       break;
-    default: console.log('handleJsonMessage() unknown action %s', action);
+    default:
+      console.log('handleJsonMessage() unknown action %s', action);
   }
 };
 
@@ -83,7 +89,6 @@ const handleRouterRtpCapabilitiesRequest = async (jsonMessage) => {
 
   try {
     const device = new mediasoup.Device();
-    // Load the mediasoup device with the router rtp capabilities gotten from the server
     await device.load({ routerRtpCapabilities });
 
     peer = new Peer(sessionId, device);
@@ -101,23 +106,19 @@ const createTransport = () => {
     throw new Error('Peer or device is not initialized');
   }
 
-  // First we must create the mediasoup transport on the server side
   socket.send(JSON.stringify({
     action: 'create-transport',
     sessionId: peer.sessionId
   }));
 };
 
-// Mediasoup Transport on the server side has been created
 const handleCreateTransportRequest = async (jsonMessage) => {
   console.log('handleCreateTransportRequest() [data:%o]', jsonMessage);
 
   try {
-    // Create the local mediasoup send transport
     peer.sendTransport = await peer.device.createSendTransport(jsonMessage);
     console.log('handleCreateTransportRequest() send transport created [id:%s]', peer.sendTransport.id);
 
-    // Set the transport listeners and get the users media stream
     handleSendTransportListeners();
     getMediaStream();
   } catch (error) {
@@ -139,23 +140,19 @@ const getMediaStream = async () => {
   const videoNode = document.getElementById('localVideo');
   videoNode.srcObject = mediaStream;
 
-  // Get the video and audio tracks from the media stream
   const videoTrack = mediaStream.getVideoTracks()[0];
   const audioTrack = mediaStream.getAudioTracks()[0];
 
-  // If there is a video track start sending it to the server
   if (videoTrack) {
     const videoProducer = await peer.sendTransport.produce({ track: videoTrack });
     peer.producers.push(videoProducer);
   }
 
-  // if there is a audio track start sending it to the server
   if (audioTrack) {
     const audioProducer = await peer.sendTransport.produce({ track: audioTrack });
     peer.producers.push(audioProducer);
   }
 
-  // Enable the start record button
   document.getElementById('startRecordButton').disabled = false;
 };
 
@@ -235,6 +232,22 @@ const handleTransportProduceEvent = ({ kind, rtpParameters }, callback, errback)
     errback(error);
   }
 };
+
+const handleFrames = (jsonMessage) => {
+  const { startFrame, endFrame } = jsonMessage;
+
+  const startFrameImg = document.getElementById('startFrame');
+  const endFrameImg = document.getElementById('endFrame');
+
+  if (startFrame) {
+    startFrameImg.src = startFrame;
+  }
+
+  if (endFrame) {
+    endFrameImg.src = endFrame;
+  }
+};
+
 
 socket.addEventListener('open', handleSocketOpen);
 socket.addEventListener('message', handleSocketMessage);

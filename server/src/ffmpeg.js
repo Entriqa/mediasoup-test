@@ -8,13 +8,16 @@ const sharp = require('sharp');
 
 const RECORD_FILE_LOCATION_PATH = process.env.RECORD_FILE_LOCATION_PATH || './files';
 
+const WebSocket = require('ws');
+
 module.exports = class FFmpeg {
-  constructor(rtpParameters) {
+  constructor(rtpParameters, onFramesProcessed) {
     this._rtpParameters = rtpParameters;
+    this._onFramesProcessed = onFramesProcessed;
     this._videoProcess = undefined;
     this._observer = new EventEmitter();
-    this._firstFrameCaptured = false;
-    this._lastFrameCaptured = false;
+    this._firstFrameBuffer = null;
+    this._lastFrameBuffer = null;
     this._sdpString = createSdpText(this._rtpParameters);
     this._sdpStream = convertStringToStream(this._sdpString);
     this._start();
@@ -43,16 +46,19 @@ module.exports = class FFmpeg {
         console.log('ffmpeg::process::data [data:%o]', data);
       });
 
+      this._videoProcess.stdout.on('data', data => {
+        console.log('ffmpeg::process::stdout [data:%o]', data);
+      });
+
       const width = 640;
       const height = 480;
       const frameSize = width * height * 3;
 
       class FrameProcessor extends Transform {
-        constructor(rtpParameters, options) {
+        constructor(ffmpegInstance, options) {
           super(options);
           this.remainingBuffer = Buffer.alloc(0);
-          this.rtpParameters = rtpParameters;
-          this.firstFrameCaptured = false;
+          this.ffmpegInstance = ffmpegInstance;
         }
 
         async _transform(chunk, encoding, callback) {
@@ -63,17 +69,19 @@ module.exports = class FFmpeg {
             this.remainingBuffer = this.remainingBuffer.slice(frameSize);
 
             try {
+              const jpegBuffer = await sharp(frameBuffer, { raw: { width, height, channels: 3 } })
+                  .jpeg()
+                  .toBuffer();
 
-              if (!this.firstFrameCaptured) {
-                await sharp(frameBuffer, { raw: { width, height, channels: 3 } })
-                    .jpeg()
-                    .toFile(`${RECORD_FILE_LOCATION_PATH}/start_frame_${this.rtpParameters.fileName}.jpg`);
-                this.firstFrameCaptured = true;
+              if (!this.ffmpegInstance._firstFrameBuffer) {
+                this.ffmpegInstance._firstFrameBuffer = jpegBuffer;
+                await fs.promises.writeFile(
+                    `${RECORD_FILE_LOCATION_PATH}/start_frame_${this.ffmpegInstance._rtpParameters.fileName}.jpg`,
+                    jpegBuffer
+                );
               }
 
-              await sharp(frameBuffer, { raw: { width, height, channels: 3 } })
-                  .jpeg()
-                  .toFile(`${RECORD_FILE_LOCATION_PATH}/end_frame_${this.rtpParameters.fileName}.jpg`);
+              this.ffmpegInstance._lastFrameBuffer = frameBuffer;
             } catch (err) {
               console.error('Error processing frame:', err);
             }
@@ -83,7 +91,7 @@ module.exports = class FFmpeg {
         }
       }
 
-      const frameProcessor = new FrameProcessor(this._rtpParameters);
+      const frameProcessor = new FrameProcessor(this);
 
       this._videoProcess.stdout.pipe(frameProcessor);
 
@@ -92,11 +100,15 @@ module.exports = class FFmpeg {
         reject(error);
       });
 
-      this._videoProcess.once('close', (code) => {
+      this._videoProcess.once('close', async (code) => {
         console.log('ffmpeg::process::close [code:%o]', code);
-        if (code === 0) {
-          this._observer.emit('process-close');
-          resolve();
+        if (code === 0 || code === 255) {
+          try {
+            await this._sendFrames();
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
         } else {
           console.error('FFmpeg stderr output:', stderr);
           reject(new Error(`FFmpeg process exited with code ${code}`));
@@ -104,19 +116,57 @@ module.exports = class FFmpeg {
       });
 
       this._sdpStream.pipe(this._videoProcess.stdin);
+
+      this._sdpStream.on('end', () => {
+        console.log('Input stream ended, closing FFmpeg stdin');
+        this._videoProcess.stdin.end();
+      });
     });
+  }
+
+  async _sendFrames() {
+    if (this._firstFrameBuffer && this._lastFrameBuffer) {
+      const width = 640;
+      const height = 480;
+      try {
+        const lastFrameJpegBuffer = await sharp(this._lastFrameBuffer, { raw: { width, height, channels: 3 } })
+            .jpeg()
+            .toBuffer();
+
+        await fs.promises.writeFile(
+            `${RECORD_FILE_LOCATION_PATH}/end_frame_${this._rtpParameters.fileName}.jpg`,
+            lastFrameJpegBuffer
+        );
+        console.log('Last frame saved successfully');
+
+        if (this._onFramesProcessed) {
+          this._onFramesProcessed(this._firstFrameBuffer, lastFrameJpegBuffer);
+        }
+      } catch (err) {
+        console.error('Error saving or sending frames:', err);
+      }
+    } else {
+      console.log('No frame buffers to send');
+    }
+  }
+
+  kill() {
+    console.log('kill() [pid:%d]', this._videoProcess?.pid);
+    if (this._videoProcess) {
+      this._videoProcess.stdin.end(() => {
+        setTimeout(() => {
+          this._sendFrames().then(() => {
+            this._videoProcess.kill('SIGTERM');
+          });
+        }, 1000);
+      });
+    }
   }
 
   _waitForProcessClose() {
     return new Promise((resolve) => {
       this._observer.once('process-close', resolve);
     });
-  }
-
-  kill() {
-    console.log('kill() [pid:%d]', this._videoProcess?.pid);
-    if (this._videoProcess) this._videoProcess.kill('SIGINT');
-    this._observer.emit('process-close');
   }
 
   get _commandArgs() {
@@ -130,7 +180,7 @@ module.exports = class FFmpeg {
       '-map', '0:v:0',
       '-c:v', 'copy',
       `${RECORD_FILE_LOCATION_PATH}/${this._rtpParameters.fileName}.webm`,
-      '-vf', 'fps=1',
+      '-vf', 'fps=30',
       '-f', 'image2pipe',
       '-vcodec', 'rawvideo',
       '-pix_fmt', 'rgb24',
