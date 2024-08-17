@@ -33,6 +33,7 @@ module.exports = class FFmpeg {
   }
 
   async _startVideoRecordingAndFrameDecoding() {
+    console.log(this._sdpStream);
     console.log('Starting video recording and frame decoding');
     console.log('FFmpeg arguments:', this._commandArgs);
 
@@ -62,6 +63,7 @@ module.exports = class FFmpeg {
         }
 
         async _transform(chunk, encoding, callback) {
+          console.log("chunk", chunk);
           this.remainingBuffer = Buffer.concat([this.remainingBuffer, chunk]);
 
           while (this.remainingBuffer.length >= frameSize) {
@@ -102,17 +104,12 @@ module.exports = class FFmpeg {
 
       this._videoProcess.once('close', async (code) => {
         console.log('ffmpeg::process::close [code:%o]', code);
-        if (code === 0 || code === 255) {
-          try {
+        try {
             await this._sendFrames();
             resolve();
           } catch (err) {
             reject(err);
           }
-        } else {
-          console.error('FFmpeg stderr output:', stderr);
-          reject(new Error(`FFmpeg process exited with code ${code}`));
-        }
       });
 
       this._sdpStream.pipe(this._videoProcess.stdin);
@@ -182,9 +179,12 @@ module.exports = class FFmpeg {
       `${RECORD_FILE_LOCATION_PATH}/${this._rtpParameters.fileName}.webm`,
       '-vf', 'fps=30',
       '-f', 'image2pipe',
+      // '-f', 'rawvideo',
       '-vcodec', 'rawvideo',
       '-pix_fmt', 'rgb24',
       'pipe:1',
+        // '-an',
+        // '-sn',
       '-rtpflags', `localport=${uniquePort}`
     ];
   }

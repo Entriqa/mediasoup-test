@@ -146,6 +146,7 @@ const handleProduceRequest = async (jsonMessage) => {
   console.log('handleProduceRequest [data:%o]', jsonMessage);
 
   const peer = peers.get(jsonMessage.sessionId);
+  console.log(peer.transports)
 
   if (!peer) {
     throw new Error(`Peer with id ${jsonMessage.sessionId} was not found`);
